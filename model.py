@@ -4,6 +4,9 @@ import time
 from math import *
 from datetime import datetime
 
+import numpy as np
+from sklearn.neighbors import KDTree
+
 # import helper functions
 from map_server import read_tsv, read_json, haversine
 
@@ -20,7 +23,7 @@ def map_nested(f, itr):
 # alternative routes
 #   * map matched path (true path)
 #   * shortest path, determined by dijkstra's algorithm
-#   * path that maximizes speed limit
+#   * path that minimizes speed limit
 #   * ...
 #   * note: alternative routes should all be independent
 
@@ -32,6 +35,8 @@ alt_route_types = [map_matched_route_type,
                    speed_limit_route_type]
 
 def read_all_alternative_routes(route_types = alt_route_types, fmt = "geojson"):
+    print("reading all route data")
+    
     # determine the length, in time, of each trip
     def timestamp_to_sec(date):
         return time.mktime(time.strptime(date, "%m/%d/%Y %I:%M:%S %p"))
@@ -58,6 +63,9 @@ def read_all_alternative_routes(route_types = alt_route_types, fmt = "geojson"):
                 if feat["geometry"]["type"] == "LineString":
                     coords = [coords]
 
+                # convert to latitute, longitude order
+                coords = map_nested(lambda x: (x[1], x[0]), coords)
+
                 route_data.extend([None] * (trip_id - len(route_data) + 1))
                 route_data[trip_id] = coords
         else:
@@ -80,7 +88,7 @@ def read_all_alternative_routes(route_types = alt_route_types, fmt = "geojson"):
 
 def calculate_direct_distance(route):
     """calculate distance between start and end point of route.
-       input: route = list of segments, which are lists of points in route.
+       input: route = list of paths, which are lists of points in route.
        output: direct distance, in meters
     """
     starting_pt = route[0][0]
@@ -89,16 +97,16 @@ def calculate_direct_distance(route):
 
 def calculate_travel_distance(route):
     """calculate total distance traveled over course of route.
-       input: route = list of segments, which are lists of points in route.
+       input: route = list of paths, which are lists of points in route.
        output: total distance, in meters
     """
     return sum([haversine(*pt1, *pt2)
-                for route_seg in route
-                for pt1, pt2 in zip(route_seg, route_seg[1:])])
+                for path in route
+                for pt1, pt2 in zip(path, path[1:])])
 
 def bad_length(route, time):
     """assess whether the trip is too long or short.
-       input: route = list of segments, which are lists of points in route.
+       input: route = list of paths, which are lists of points in route.
               time = total amount of time that the trip took, in seconds
        output: boolean
     """
@@ -107,8 +115,8 @@ def bad_length(route, time):
         return True
     
     # determine total number of recorded points
-    num_gps_pts = len([pt for route_segment in route
-                       for pt in route_segment])
+    num_gps_pts = len([pt for route_path in route
+                       for pt in route_path])
     if num_gps_pts < 10:
         return True
 
@@ -127,8 +135,8 @@ def bad_length(route, time):
 
 def non_utilitarian(route, djikstra_route):
     """assess whether the trip does not seem to have a utilitarian purpose.
-       input: route = list of segments, which are lists of points in route.
-              djikstra_route = list of segments of points in the optimal route.
+       input: route = list of paths, which are lists of points in route.
+              djikstra_route = list of paths of points in the optimal route.
        output: boolean
     """
     direct_distance = calculate_direct_distance(route)
@@ -149,6 +157,8 @@ def bad_route(route, djikstra_route, time):
     return bad_length(route, time) or non_utilitarian(route, djikstra_route)
 
 def filter_alt_routes(alt_routes_by_trip, trip_times):
+    print("filtering routes")
+    
     # assumes that the first route type is the map matched route
     # and that the second route type is the djikstra's shortest route
     return [alt_routes
@@ -158,7 +168,7 @@ def filter_alt_routes(alt_routes_by_trip, trip_times):
 # factors in value function
 #   * length of path
 #   * aadt / 1000, averaged over segments in path
-#   * max speed limit on a segment (SP_LIM)
+#   * min speed limit on a segment (SP_LIM)
 #   * proportion of bike facilities on path
 #   * number of turns / mile
 
@@ -177,6 +187,9 @@ def read_street_data():
         if feature["geometry"]["type"] == "LineString":
             coords = [coords]
 
+        # convert to latitude, longitude format
+        coords = map_nested(lambda x: (x[1], x[0]), coords)
+
         # remove z component
         coords = map_nested(lambda x: x[:2], coords)
         street_coords_and_props.append((coords, aadt, sp_lim))
@@ -191,6 +204,7 @@ def read_bike_trail_data():
         coords = feature["geometry"]["coordinates"]
         if feature["geometry"]["type"] == "LineString":
             coords = [coords]
+        coords = map_nested(lambda x: (x[1], x[0]), coords)
         trail_data.append(coords)
     return trail_data
 
@@ -201,28 +215,44 @@ def pt_is_between(a, b, c, tol = 10):
     """
     return abs(haversine(*a, *c) + haversine(*c, *b) - haversine(*a, *b)) < tol
 
-def closest_street_id_to_pt(pt, street_coords_and_props):
-    for i, (street_coords, _, _) in enumerate(street_coords_and_props):
-        for segment in street_coords:
-            for pt1_, pt2_ in zip(segment, segment[1:]):
-                if pt_is_between(pt1_, pt2_, pt):
-                    return i
-    return None
+def get_closest_route_finder(route_list):
+    """construct a function to quickly find route that covers a line segment"""
+    # map every pt to the street_id for which it belongs
+    pt_to_street_id = dict([(pt, i)
+                            for i, route
+                            in enumerate(route_list)
+                            for path in route for pt in path])
+    pt_list = list(pt_to_street_id.keys())
+    
+    # construct kd tree to find nearest street of a pt more efficiently
+    x = np.array(pt_list)
+    kdt = KDTree(x, metric = 'euclidean')
 
-def closest_trail_id_to_pt(pt, bike_trails):
-    for i, (trail_coords) in enumerate(bike_trails):
-        for segment in trail_coords:
-            for pt1_, pt2_ in zip(segment, segment[1:]):
-                if pt_is_between(pt1_, pt2_, pt):
-                    return i
-    return None
+    def pt_in_route(pt, route):
+        return any([pt_is_between(*line_segment, pt)
+                    for path in route
+                    for line_segment in zip(path, path[1:])])
+    
+    def closest_route_finder(pt1, pt2):
+        closest_st_pts = kdt.query([pt1], k = 10, return_distance = False)
+        closest_st_ids = [pt_to_street_id[pt_list[pt_ind]]
+                          for pt_ind in closest_st_pts[0]]
+        closest_st_ids = list(set(closest_st_ids))
+        for st_id in closest_st_ids:
+            if pt_in_route(pt1, route_list[st_id]) and \
+               pt_in_route(pt2, route_list[st_id]):
+                return st_id
+        return None
 
-def proportion_route_on_trail(route, bike_trails):
+    # return a closure to a function that finds street that best matches a point
+    return closest_route_finder
+
+def proportion_route_on_trail(route, trail_finder):
+    """calculate percentage of the route spent traveling on bike facilities"""
     dist_on_trail = sum([haversine(*pt1, *pt2)
-                         for segment in route
-                         for pt1, pt2 in zip(segment, segment[1:])
-                         if closest_trail_id_to_pt(pt1, bike_trails) != None
-                         and closest_trail_id_to_pt(pt2, bike_trails) != None])
+                         for path in route
+                         for pt1, pt2 in zip(path, path[1:])
+                         if trail_finder(pt1, pt2) != None])
     total_dist = calculate_travel_distance(route)
     return dist_on_trail / total_dist
 
@@ -231,56 +261,136 @@ def turns_per_distance(route):
     total_dist = calculate_travel_distance(route)
     angles_since_last_turn = []
     number_of_turns = 0
-    for segment in route:
-        for pt1, pt2 in zip(segment, segment[1:]):
+    for path in route:
+        for pt1, pt2 in zip(path, path[1:]):
             angle = atan2(pt2[1] - pt1[1], pt2[0] - pt1[0])
-            if any([abs(abs(angle - angle_) - pi / 2) % (2 * pi) < pi * 0.05
+
+            # determine if difference btwn angles is close to 90 degrees
+            if any([abs(abs(angle - angle_) - pi / 2) % (2 * pi) < pi * 0.1
                     for angle_ in angles_since_last_turn]):
                 angles_since_last_turn = []
                 number_of_turns += 1
             angles_since_last_turn.append(angle)
     return number_of_turns / (total_dist / 1000)
 
+def nearly_identical_pts(pt1, pt2, tol = 3):
+    """determine if two (lat, lng) pts are nearly the same"""
+    return haversine(*pt1, *pt2) < tol
+
+def nearly_identical_segment(line_segment, line_segment_):
+    """determine if two line segments are nearly the same"""
+    return (nearly_identical_pts(line_segment[0], line_segment_[0]) and \
+            nearly_identical_pts(line_segment[1], line_segment_[1])) or \
+           (nearly_identical_pts(line_segment[0], line_segment_[1]) and \
+            nearly_identical_pts(line_segment[1], line_segment_[0]))
+
+def line_segment_on_route(line_segment, route_):
+    """determine if a line segment lies on a route"""
+    return any([nearly_identical_segment(line_segment, line_segment_)
+                for path_ in route_
+                for line_segment_ in zip(path_, path_[1:])])
+
+def path_size_factor(route, alt_routes):
+    """calculates path size factor for route"""
+    total_dist = calculate_travel_distance(route)
+    return sum([haversine(*pt1, *pt2) / \
+                sum([line_segment_on_route((pt1, pt2), route_)
+                     for route_ in alt_routes])
+                for path in route
+                for pt1, pt2 in zip(path, path[1:])]) / total_dist
+
 def model_max_likelihood(alt_routes_by_trip):
+    print("generating route attributes")
+    
     # determine attributes of each alternative route
-    alt_lengths_by_trip = [[calculate_travel_distance(route)
+    # calculate the travel distance, in kilometers, for each route
+    print(" generating length attributes")
+    alt_lengths_by_trip = [[calculate_travel_distance(route) / 1000
                             for route in alt_routes]
                            for alt_routes in alt_routes_by_trip]
 
+    # make a function to find the street that covers a given point
+    print(" generating aadt / splim attributes")
     street_coords_and_props = read_street_data()
+    st_finder = get_closest_route_finder(
+        [st[0] for st in street_coords_and_props])
+    
     alt_aadts_by_trip = []
     alt_splim_by_trip = []
     for alt_routes in alt_routes_by_trip:
         alt_aadts = []
         alt_splim = []
         for route in alt_routes:
-            street_ids = [closest_street_id_to_pt(pt, street_coords_and_props)
-                          for segment in route
-                          for pt in segment]
-            street_ids = list(set(street_ids).difference([None]))
-            
-            all_aadts = [street_coords_and_props[i][1] for i in street_ids]
-            avg_aadt = sum(all_aadts) / len(all_aadts) / 1000
-            alt_aadts.append(avg_aadt)
+            # get the street id associated with every segment in the route
+            # paired with the length of the segment
+            street_ids_and_dist = [(st_finder(pt1, pt2), haversine(*pt1, *pt2))
+                                   for path in route
+                                   for pt1, pt2 in zip(path, path[1:])]
 
-            all_splim = [street_coords_and_props[i][2] for i in street_ids]
-            max_splim = max(all_splim)
+            # remove pairs that could not be mapped to a street
+            street_ids_and_dist = [sid for sid in street_ids_and_dist
+                                   if sid[0] != None]
+
+            # calculate the average weighted aadt
+            if len(street_ids_and_dist) > 0:
+                aadts = [street_coords_and_props[sid[0]][1]
+                         for sid in street_ids_and_dist]
+                wgt_avg_aadt = sum([a * b for a, b in street_ids_and_dist]) /\
+                               sum([dist for _, dist in street_ids_and_dist])
+            else:
+                wgt_avg_aadt = 0
+            alt_aadts.append(wgt_avg_aadt / 1000)
+
+            # calculate max posted speed limit
+            if len(street_ids_and_dist) > 0:
+                all_splim = [street_coords_and_props[sid[0]][2]
+                             for sid in street_ids_and_dist]
+                max_splim = max(all_splim) / 10
+            else:
+                max_splim = 0
             alt_splim.append(max_splim)
         alt_aadts_by_trip.append(alt_aadts)
         alt_splim_by_trip.append(alt_splim)
 
+    print(" generating bike facility attributes")
     bike_trails = read_bike_trail_data()
-    alt_trail_perc_by_trip = [[proportion_route_on_trail(route, bike_trails)
+    trail_finder = get_closest_route_finder(bike_trails)
+    alt_trail_perc_by_trip = [[proportion_route_on_trail(route, trail_finder)
                                for route in alt_routes]
                               for alt_routes in alt_routes_by_trip]
 
     alt_turns_by_trip = [[turns_per_distance(route)
                           for route in alt_routes]
                          for alt_routes in alt_routes_by_trip]
+
+    alt_psf_by_trip = [[path_size_factor(route, alt_routes)
+                                 for route in alt_routes]
+                                for alt_routes in alt_routes_by_trip]
+
+    print("maximizing log likelihood")
+    all_attr_by_trip = list(zip(alt_lengths_by_trip, alt_aadts_by_trip,
+                                alt_splim_by_trip,  alt_trail_perc_by_trip,
+                                alt_turns_by_trip))
+    def value(param, attrs):
+        return sum([p * w for p, w in zip(param, attrs)])
     
-    params = [0] * 5
+    def calc_log_likelihood(params):
+        total_ll = 0
+        for all_attrs, alt_psf in zip(all_attr_by_trip, alt_psf_by_trip):
+            exps = [exp(value(params, attrs) + log(psf))
+                    for attrs, psf in zip(zip(*all_attrs), alt_psf)]
+            total_ll += log(exps[0] / sum(exps))
+        return total_ll
+
+    def normalize(params):
+        dot_prod = sqrt(sum([p * p for p in params]))
+        return [p / dot_prod for p in params]
+    
+    params = [0.1] * 5
+    params = normalize(params)
+    print(calc_log_likelihood(params))
     return alt_lengths_by_trip, alt_aadts_by_trip, alt_splim_by_trip, \
-           alt_trail_perc_by_trip, alt_turns_by_trip
+           alt_trail_perc_by_trip, alt_turns_by_trip, alt_psf_by_trip
 
 if __name__ == "__main__":
     # get all alternative routes, and time taken, for each trip
