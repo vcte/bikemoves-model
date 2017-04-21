@@ -371,26 +371,44 @@ def model_max_likelihood(alt_routes_by_trip):
     all_attr_by_trip = list(zip(alt_lengths_by_trip, alt_aadts_by_trip,
                                 alt_splim_by_trip,  alt_trail_perc_by_trip,
                                 alt_turns_by_trip))
+    
     def value(param, attrs):
         return sum([p * w for p, w in zip(param, attrs)])
-    
-    def calc_log_likelihood(params):
-        total_ll = 0
-        for all_attrs, alt_psf in zip(all_attr_by_trip, alt_psf_by_trip):
-            exps = [exp(value(params, attrs) + log(psf))
-                    for attrs, psf in zip(zip(*all_attrs), alt_psf)]
-            total_ll += log(exps[0] / sum(exps))
-        return total_ll
 
     def normalize(params):
         dot_prod = sqrt(sum([p * p for p in params]))
-        return [p / dot_prod for p in params]
+        if dot_prod > 0:
+            return [p / dot_prod for p in params]
+        else:
+            return params
+    
+    def calc_log_likelihood(params):
+        total_ll = 0
+        derivatives = [0] * len(params)
+        for all_alt_attrs, alt_psf in zip(all_attr_by_trip, alt_psf_by_trip):
+            exps = [exp(value(params, attrs) + log(psf))
+                    for attrs, psf in zip(zip(*all_alt_attrs), alt_psf)]
+            total_ll += log(exps[0] / sum(exps))
+
+            dx = [all_alt_attrs[i][0] -
+                  sum([alt_attrs[i] * exp for alt_attrs, exp
+                       in zip(zip(*all_alt_attrs), exps)]) / sum(exps)
+                  for i in range(len(params))]
+            dx = normalize(dx)
+            derivatives = [derivatives[i] + dx[i] for i in range(len(params))]
+            
+        return total_ll, derivatives
     
     params = [0.1] * 5
     params = normalize(params)
-    print(calc_log_likelihood(params))
-    return alt_lengths_by_trip, alt_aadts_by_trip, alt_splim_by_trip, \
-           alt_trail_perc_by_trip, alt_turns_by_trip, alt_psf_by_trip
+    for _ in range(1000):
+        log_likelihood, derivative = calc_log_likelihood(params)
+        print(log_likelihood)
+        derivative = normalize(derivative)
+        params = [params[i] + 0.1 * derivative[i] for i in range(len(params))]
+        params = normalize(params)
+        print(params)
+    return params
 
 if __name__ == "__main__":
     # get all alternative routes, and time taken, for each trip
@@ -408,3 +426,7 @@ if __name__ == "__main__":
 
     # find parameters that maximize model
     params = model_max_likelihood(alt_routes_by_trip)
+
+# TODO
+#  * remove identical alternatives
+#  * add more alternative routes
