@@ -8,7 +8,7 @@ import numpy as np
 from sklearn.neighbors import KDTree
 
 # import helper functions
-from map_server import read_tsv, read_json, haversine
+from util import read_tsv, read_json, haversine
 
 # constants
 data_directory = "static/data/"
