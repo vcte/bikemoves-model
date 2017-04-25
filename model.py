@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import random
 from math import *
 from datetime import datetime
 
@@ -27,12 +28,16 @@ def map_nested(f, itr):
 #   * ...
 #   * note: alternative routes should all be independent
 
-map_matched_route_type = "clean_route_latlog"
-dijkstras_route_type = "dijkstra_route_latlog"
-speed_limit_route_type = "speed_route_latlog"
+map_matched_route_type = "clean_data"
+dijkstras_route_type = "shortest_route"
+speed_limit_route_type = "speed_route"
+second_shortest_type = "second_shortest_route"
+min_intersection_type = "minimum_intersections_route"
 alt_route_types = [map_matched_route_type,
                    dijkstras_route_type,
-                   speed_limit_route_type]
+                   speed_limit_route_type,
+                   second_shortest_type,
+                   min_intersection_type]
 
 def read_all_alternative_routes(route_types = alt_route_types, fmt = "geojson"):
     print("reading all route data")
@@ -156,12 +161,19 @@ def non_utilitarian(route, djikstra_route):
 def bad_route(route, djikstra_route, time):
     return bad_length(route, time) or non_utilitarian(route, djikstra_route)
 
+def unique_routes(alt_routes):
+    uniq_routes = []
+    for route in alt_routes:
+        if route not in uniq_routes:
+            uniq_routes.append(route)
+    return uniq_routes
+
 def filter_alt_routes(alt_routes_by_trip, trip_times):
     print("filtering routes")
     
     # assumes that the first route type is the map matched route
     # and that the second route type is the djikstra's shortest route
-    return [alt_routes
+    return [unique_routes(alt_routes)
             for alt_routes, time in zip(alt_routes_by_trip, trip_times)
             if not bad_route(alt_routes[0], alt_routes[1], time)]
 
@@ -299,12 +311,11 @@ def path_size_factor(route, alt_routes):
                 for path in route
                 for pt1, pt2 in zip(path, path[1:])]) / total_dist
 
-def model_max_likelihood(alt_routes_by_trip):
+def generate_attributes(alt_routes_by_trip):
     print("generating route attributes")
     
     # determine attributes of each alternative route
     # calculate the travel distance, in kilometers, for each route
-    print(" generating length attributes")
     alt_lengths_by_trip = [[calculate_travel_distance(route) / 1000
                             for route in alt_routes]
                            for alt_routes in alt_routes_by_trip]
@@ -333,10 +344,11 @@ def model_max_likelihood(alt_routes_by_trip):
 
             # calculate the average weighted aadt
             if len(street_ids_and_dist) > 0:
-                aadts = [street_coords_and_props[sid[0]][1]
-                         for sid in street_ids_and_dist]
-                wgt_avg_aadt = sum([a * b for a, b in street_ids_and_dist]) /\
-                               sum([dist for _, dist in street_ids_and_dist])
+                # list of (aadt, length) pairs for each street segment
+                aadt_and_dists = [(street_coords_and_props[sid[0]][1], sid[1])
+                                  for sid in street_ids_and_dist]
+                wgt_avg_aadt = sum([a * b for a, b in aadt_and_dists]) /\
+                               sum([dist for _, dist in aadt_and_dists])
             else:
                 wgt_avg_aadt = 0
             alt_aadts.append(wgt_avg_aadt / 1000)
@@ -367,15 +379,36 @@ def model_max_likelihood(alt_routes_by_trip):
                                  for route in alt_routes]
                                 for alt_routes in alt_routes_by_trip]
 
-    print("maximizing log likelihood")
     all_attr_by_trip = list(zip(alt_lengths_by_trip, alt_aadts_by_trip,
                                 alt_splim_by_trip,  alt_trail_perc_by_trip,
                                 alt_turns_by_trip))
     
+    return all_attr_by_trip, alt_psf_by_trip
+
+def save_attrs(all_attr_by_trip, alt_psf_by_trip):
+    attr_list = [[list(attrs) for attrs in zip(*alt_attrs + (psfs, ))]
+                 for alt_attrs, psfs in zip(all_attr_by_trip, alt_psf_by_trip)]
+    attr_file = data_directory + "attrs.json"
+    with open(attr_file, mode = "w", encoding = "utf-8") as f:
+        json.dump(attr_list, f, indent = 3)
+
+def read_attrs(attr_file = data_directory + "attrs.json"):
+    with open(attr_file, mode = "r", encoding = "utf-8") as f:
+        attr_list = json.load(f)
+    all_attr_by_trip = []; alt_psf_by_trip = []
+    for alt_attrs in attr_list:
+        attrs = list(zip(*alt_attrs))
+        all_attr_by_trip.append(attrs[:-1])
+        alt_psf_by_trip.append(attrs[-1])
+    return all_attr_by_trip, alt_psf_by_trip
+
+def model_max_likelihood(all_attr_by_trip, alt_psf_by_trip):
+    print("maximizing log likelihood")
+    
     def value(param, attrs):
         return sum([p * w for p, w in zip(param, attrs)])
 
-    def normalize(params):
+    def rescale(params):
         dot_prod = sqrt(sum([p * p for p in params]))
         if dot_prod > 0:
             return [p / dot_prod for p in params]
@@ -394,38 +427,49 @@ def model_max_likelihood(alt_routes_by_trip):
                   sum([alt_attrs[i] * exp for alt_attrs, exp
                        in zip(zip(*all_alt_attrs), exps)]) / sum(exps)
                   for i in range(len(params))]
-            dx = normalize(dx)
+            dx = rescale(dx)
             derivatives = [derivatives[i] + dx[i] for i in range(len(params))]
             
         return total_ll, derivatives
-    
+
+    eps = 0.00001
     params = [0.1] * 5
-    params = normalize(params)
+    params = rescale(params)
     for _ in range(1000):
         log_likelihood, derivative = calc_log_likelihood(params)
-        print(log_likelihood)
-        derivative = normalize(derivative)
-        params = [params[i] + 0.1 * derivative[i] for i in range(len(params))]
-        params = normalize(params)
-        print(params)
+        derivative = rescale(derivative)
+        delta = [0.1 * derivative[i] for i in range(len(params))]
+
+        # halt if the update vector is close to 0
+        if all([d < eps for d in delta]):
+            break
+
+        # otherwise update parameters
+        params = [params[i] + delta[i] for i in range(len(delta))]
+        params = rescale(params)
+    print("final ll: " + str(log_likelihood))
+    print("final params: " + str(params))
     return params
 
 if __name__ == "__main__":
     # get all alternative routes, and time taken, for each trip
-    alt_routes_by_type, times_by_trip = read_all_alternative_routes()
+##    alt_routes_by_type, times_by_trip = read_all_alternative_routes()
+##
+##    # reformat data
+##    alt_routes_by_trip = list(zip(*alt_routes_by_type))
+##    alt_routes_by_trip, trip_times = zip(* \
+##        [(alt_routes, time)
+##         for (alt_routes, time) in zip(alt_routes_by_trip, times_by_trip)
+##         if not any([route is None for route in alt_routes])])
+##
+##    # filter out trips
+##    alt_routes_by_trip = filter_alt_routes(alt_routes_by_trip, trip_times)
+##
+##    # find parameters that maximize model
+##    all_attr_by_trip, alt_psf_by_trip = generate_attributes(alt_routes_by_trip)
 
-    # reformat data
-    alt_routes_by_trip = list(zip(*alt_routes_by_type))
-    alt_routes_by_trip, trip_times = zip(* \
-        [(alt_routes, time)
-         for (alt_routes, time) in zip(alt_routes_by_trip, times_by_trip)
-         if not any([route is None for route in alt_routes])])
-
-    # filter out trips
-    alt_routes_by_trip = filter_alt_routes(alt_routes_by_trip, trip_times)
-
-    # find parameters that maximize model
-    params = model_max_likelihood(alt_routes_by_trip)
+    all_attr_by_trip, alt_psf_by_trip = read_attrs()
+    params = model_max_likelihood(all_attr_by_trip, alt_psf_by_trip)
 
 # TODO
 #  * remove identical alternatives
