@@ -195,6 +195,15 @@ def read_street_data():
         sp_lim = int(feature["properties"]["SP_LIM"])
         coords = feature["geometry"]["coordinates"]
 
+        # extract all attributes
+        attrs = []
+        for key in sorted(feature["properties"].keys()):
+            try:
+                val = int(feature["properties"][key])
+            except BaseException:
+                val = 0
+            attrs.append(val)
+
         # make sure that coordinates are in triply nested format
         if feature["geometry"]["type"] == "LineString":
             coords = [coords]
@@ -204,7 +213,7 @@ def read_street_data():
 
         # remove z component
         coords = map_nested(lambda x: x[:2], coords)
-        street_coords_and_props.append((coords, aadt, sp_lim))
+        street_coords_and_props.append((coords, attrs))
     return street_coords_and_props
 
 def read_bike_trail_data():
@@ -325,44 +334,77 @@ def generate_attributes(alt_routes_by_trip):
     street_coords_and_props = read_street_data()
     st_finder = get_closest_route_finder(
         [st[0] for st in street_coords_and_props])
-    
-    alt_aadts_by_trip = []
-    alt_splim_by_trip = []
+
+    street_ids_and_dist_by_trip = []
     for alt_routes in alt_routes_by_trip:
-        alt_aadts = []
-        alt_splim = []
+        street_ids_and_dists = []
         for route in alt_routes:
-            # get the street id associated with every segment in the route
-            # paired with the length of the segment
             street_ids_and_dist = [(st_finder(pt1, pt2), haversine(*pt1, *pt2))
                                    for path in route
                                    for pt1, pt2 in zip(path, path[1:])]
-
-            # remove pairs that could not be mapped to a street
+            
             street_ids_and_dist = [sid for sid in street_ids_and_dist
                                    if sid[0] != None]
+            street_ids_and_dists.append(street_ids_and_dist)
+        street_ids_and_dist_by_trip.append(street_ids_and_dists)
+
+    alt_street_attrs_by_trip = []
+    for i in range(len(street_coords_and_props[0][1])):
+        alt_attr_by_trip = []
+        for j, alt_routes in enumerate(alt_routes_by_trip):
+            alt_attr = []
+            for k, route in enumerate(alt_routes):
+                street_ids_and_dist = street_ids_and_dist_by_trip[j][k]
+
+                if len(street_ids_and_dist) > 0:
+                    attr_and_dist = [(street_coords_and_props[sid][1][i], dist)
+                                     for sid, dist in street_ids_and_dist]
+                    wgt_avg_attr = sum([a * b for a, b in attr_and_dist]) /\
+                                   sum([dist for _, dist in attr_and_dist])
+                else:
+                    wgt_avg_attr = 0
+                alt_attr.append(wgt_avg_attr)
+            alt_attr_by_trip.append(alt_attr)
+        alt_street_attrs_by_trip.append(alt_attr_by_trip)
+    
+##    alt_aadts_by_trip = []
+##    alt_splim_by_trip = []
+##    for alt_routes in alt_routes_by_trip:
+##        alt_aadts = []
+##        alt_splim = []
+##        for route in alt_routes:
+            # get the street id associated with every segment in the route
+            # paired with the length of the segment
+##            street_ids_and_dist = [(st_finder(pt1, pt2), haversine(*pt1, *pt2))
+##                                   for path in route
+##                                   for pt1, pt2 in zip(path, path[1:])]
+
+            # remove pairs that could not be mapped to a street
+##            street_ids_and_dist = [sid for sid in street_ids_and_dist
+##                                   if sid[0] != None]
 
             # calculate the average weighted aadt
-            if len(street_ids_and_dist) > 0:
-                # list of (aadt, length) pairs for each street segment
-                aadt_and_dists = [(street_coords_and_props[sid[0]][1], sid[1])
-                                  for sid in street_ids_and_dist]
-                wgt_avg_aadt = sum([a * b for a, b in aadt_and_dists]) /\
-                               sum([dist for _, dist in aadt_and_dists])
-            else:
-                wgt_avg_aadt = 0
-            alt_aadts.append(wgt_avg_aadt / 1000)
-
-            # calculate max posted speed limit
-            if len(street_ids_and_dist) > 0:
-                all_splim = [street_coords_and_props[sid[0]][2]
-                             for sid in street_ids_and_dist]
-                max_splim = max(all_splim) / 10
-            else:
-                max_splim = 0
-            alt_splim.append(max_splim)
-        alt_aadts_by_trip.append(alt_aadts)
-        alt_splim_by_trip.append(alt_splim)
+##            if len(street_ids_and_dist) > 0:
+##                # list of (aadt, length) pairs for each street segment
+##                aadt_and_dists = [(street_coords_and_props[sid[0]][1], sid[1])
+##                                  for sid in street_ids_and_dist]
+##                wgt_avg_aadt = sum([a * b for a, b in aadt_and_dists]) /\
+##                               sum([dist for _, dist in aadt_and_dists])
+##            else:
+##                wgt_avg_aadt = 0
+##            alt_aadts.append(wgt_avg_aadt / 1000)
+##
+##            # calculate max posted speed limit
+##            if len(street_ids_and_dist) > 0:
+##                all_splim = [street_coords_and_props[sid[0]][2]
+##                             for sid in street_ids_and_dist]
+##                max_splim = max(all_splim) / 10
+##            else:
+##                max_splim = 0
+##            alt_splim.append(max_splim)
+            
+##        alt_aadts_by_trip.append(alt_aadts)
+##        alt_splim_by_trip.append(alt_splim)
 
     print(" generating bike facility attributes")
     bike_trails = read_bike_trail_data()
@@ -379,9 +421,8 @@ def generate_attributes(alt_routes_by_trip):
                                  for route in alt_routes]
                                 for alt_routes in alt_routes_by_trip]
 
-    all_attr_by_trip = list(zip(alt_lengths_by_trip, alt_aadts_by_trip,
-                                alt_splim_by_trip,  alt_trail_perc_by_trip,
-                                alt_turns_by_trip))
+    all_attr_by_trip = list(zip(alt_lengths_by_trip, alt_trail_perc_by_trip,
+                                alt_turns_by_trip, *alt_street_attrs_by_trip))
     
     return all_attr_by_trip, alt_psf_by_trip
 
@@ -402,8 +443,32 @@ def read_attrs(attr_file = data_directory + "attrs.json"):
         alt_psf_by_trip.append(attrs[-1])
     return all_attr_by_trip, alt_psf_by_trip
 
+def calculate_means_and_vars(all_attr_by_trip):
+    counts = [0] * len(all_attr_by_trip[0])
+    means  = [0] * len(all_attr_by_trip[0])
+    m2s    = [0] * len(all_attr_by_trip[0])
+    for alt_attrs in all_attr_by_trip:
+        for i, attrs in enumerate(alt_attrs):
+            for x in attrs:
+                counts[i] += 1
+                delta = x - means[i]
+                means[i] += delta / counts[i]
+                delta2 = x - means[i]
+                m2s[i] += delta * delta2
+    return means, [m2 / (n + 0.001) + 0.001 for n, m2 in zip(counts, m2s)]
+
 def model_max_likelihood(all_attr_by_trip, alt_psf_by_trip):
     print("maximizing log likelihood")
+
+    # normalize all attributes
+    means, variances = calculate_means_and_vars(all_attr_by_trip)
+    print(means, variances)
+    for k, alt_attrs in enumerate(all_attr_by_trip):
+        for i, attrs in enumerate(alt_attrs):
+            normalized_attrs = []
+            for x in attrs:
+                normalized_attrs.append((x - means[i]) / sqrt(variances[i]))
+            all_attr_by_trip[k][i] = tuple(normalized_attrs)
     
     def value(param, attrs):
         return sum([p * w for p, w in zip(param, attrs)])
@@ -433,7 +498,7 @@ def model_max_likelihood(all_attr_by_trip, alt_psf_by_trip):
         return total_ll, derivatives
 
     eps = 0.00001
-    params = [0.1] * 5
+    params = [0.1] * len(all_attr_by_trip[0])
     params = rescale(params)
     for _ in range(1000):
         log_likelihood, derivative = calc_log_likelihood(params)
@@ -453,22 +518,22 @@ def model_max_likelihood(all_attr_by_trip, alt_psf_by_trip):
 
 if __name__ == "__main__":
     # get all alternative routes, and time taken, for each trip
-##    alt_routes_by_type, times_by_trip = read_all_alternative_routes()
-##
-##    # reformat data
-##    alt_routes_by_trip = list(zip(*alt_routes_by_type))
-##    alt_routes_by_trip, trip_times = zip(* \
-##        [(alt_routes, time)
-##         for (alt_routes, time) in zip(alt_routes_by_trip, times_by_trip)
-##         if not any([route is None for route in alt_routes])])
-##
-##    # filter out trips
-##    alt_routes_by_trip = filter_alt_routes(alt_routes_by_trip, trip_times)
-##
-##    # find parameters that maximize model
-##    all_attr_by_trip, alt_psf_by_trip = generate_attributes(alt_routes_by_trip)
+    alt_routes_by_type, times_by_trip = read_all_alternative_routes()
 
-    all_attr_by_trip, alt_psf_by_trip = read_attrs()
+    # reformat data
+    alt_routes_by_trip = list(zip(*alt_routes_by_type))
+    alt_routes_by_trip, trip_times = zip(* \
+        [(alt_routes, time)
+         for (alt_routes, time) in zip(alt_routes_by_trip, times_by_trip)
+         if not any([route is None for route in alt_routes])])
+
+    # filter out trips
+    alt_routes_by_trip = filter_alt_routes(alt_routes_by_trip, trip_times)
+
+    # find parameters that maximize model
+    all_attr_by_trip, alt_psf_by_trip = generate_attributes(alt_routes_by_trip)
+
+##    all_attr_by_trip, alt_psf_by_trip = read_attrs()
     params = model_max_likelihood(all_attr_by_trip, alt_psf_by_trip)
 
 # TODO
