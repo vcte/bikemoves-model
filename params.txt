@@ -1,0 +1,23 @@
+------------------------------------------------------------------------
+| Description | Calculation method           | Hypothesis | Value      | 
+------------------------------------------------------------------------
+| Length      | Total haversine distance of  | Negative   | 0.080      |
+|             | all path segments            | for longer |            |
+------------------------------------------------------------------------
+| AADTS       | Weighted average of AADTS of | Negative   | -0.432     |
+|             | all street segments traveled | for higher |            |
+|             | on, weighted by distance     | AADT       |            |
+|             | spent on segment             |            |            |
+------------------------------------------------------------------------
+| Speed       | Max speed limit over all     | Negative   | -0.371     |
+| Limit       | street segments traveled     |            |            |
+------------------------------------------------------------------------
+| Facility    | Proportion of route spent    | Positive   | 0.776      |
+| Usage       | on bike trails               |            |            |
+------------------------------------------------------------------------
+| Number of   | Number of left and right     | Negative   | -0.257     |
+| turns       | turns per kilometer traveled |            |            |
+------------------------------------------------------------------------
+| Width       | Weighted average of width of | ???        | 0.000222   |
+|             | street segments traveled on  |            |            |
+------------------------------------------------------------------------

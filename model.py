@@ -513,5 +513,4 @@ if __name__ == "__main__":
     params = model_max_likelihood(all_attr_by_trip, alt_psf_by_trip)
 
 # TODO
-#  * remove identical alternatives
 #  * add more alternative routes
